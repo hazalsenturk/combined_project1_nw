@@ -28,12 +28,13 @@
 #define HIGH_ENTROPY_FILENAME "highEntropyData"
 
 
-#define NUM_RST_PACKETS 2  // wait for 2 RST packets
-#define NUM_THREADS 2      // use 2 threads
-pthread_t thread1, thread2; // thread identifiers
+#define NUM_RST_PACKETS 2  // Number of RST packets to receive
+#define NUM_THREADS 2      // Number of thread used to receive RST packets. One for the low entropy data and
+                            // one for the high entropy data
+pthread_t thread1, thread2; // thread global variables
 
 
-// Declare global variables to store the time differences
+// Global variables to store the time differences
 long high_rst_diffs_thread1_first[NUM_RST_PACKETS];
 long high_rst_diffs_thread1_second[NUM_RST_PACKETS];
 long high_rst_diffs_thread2_first[NUM_RST_PACKETS];
@@ -45,46 +46,7 @@ unsigned short csum(unsigned short *ptr, int nbytes);
 void send_syn_packet(int sockfd, struct sockaddr_in *target, int packet_ttl, int src_port) ;
 long wait_for_rst_packet(int sockfd);
 char* read_high_entropy_data(const char *filename, int size);
-
-// Define the thread function to wait for RST packets
-void* wait_for_rst_thread(void* arg) {
-    int sockfd = *(int*)arg;
-    long* rst_diff_ptr = (long*)malloc(sizeof(long));
-    int num_rst_packets = 0;
-    long* high_rst_diffs_first;
-    long* high_rst_diffs_second;
-
-    // Determine which global arrays to store the time differences in
-    if (pthread_self() == thread1) {
-        high_rst_diffs_first = high_rst_diffs_thread1_first;
-        high_rst_diffs_second = high_rst_diffs_thread1_second;
-    } else if (pthread_self() == thread2) {
-        high_rst_diffs_first = high_rst_diffs_thread2_first;
-        high_rst_diffs_second = high_rst_diffs_thread2_second;
-    } else {
-        // This should never happen
-        perror("Error: invalid thread");
-        exit(1);
-    }
-
-    while (num_rst_packets < NUM_RST_PACKETS) {
-        // Wait for an RST packet
-        *rst_diff_ptr = wait_for_rst_packet(sockfd);
-
-        // Store the time difference in the appropriate global array
-        if (num_rst_packets == 0) {
-            high_rst_diffs_first[num_rst_packets] = *rst_diff_ptr;
-        } else {
-            high_rst_diffs_second[num_rst_packets - 1] = *rst_diff_ptr;
-        }
-
-        // Increment the counter
-        num_rst_packets++;
-    }
-
-    free(rst_diff_ptr);
-    pthread_exit(NULL);
-}
+void* wait_for_rst_thread(void* arg);
 
 /*
  * A function to handle the SIGALRM signal and exit the program if the timer expires
@@ -240,21 +202,15 @@ int main(int argc, char *argv[]) {
 	// // Set the signal handler for SIGALRM
 	signal(SIGALRM, handler);
 
-
-    // pthread_t thread1, thread2;
-    
+    // Create the thread1 to wait for RST packets from the first 2 SYN packets
     if (pthread_create(&thread1, NULL, wait_for_rst_thread, &sockfd)!= 0) {
         perror("pthread_create");
         exit(1);
     }
 	
     
-        
-
-    
     // Send the SYN packet to the port_x and timestamp it within the send_syn_packet function
 	send_syn_packet(sockfd, &target_x, packet_ttl, tcp_port);
-    // long low_rst_diff_1 = wait_for_rst_packet(sockfd); 
 
 	train_size = udp_packet_train_size;
 	packet_id = train_size - 1;
@@ -273,12 +229,8 @@ int main(int argc, char *argv[]) {
 	// Send the SYN packet to the port_y and timestamp it within the send_syn_packet function
 	send_syn_packet(sockfd, &target_y, packet_ttl, tcp_port);
      
+     // Wait for the thread1 to finish
     pthread_join(thread1, NULL);
-
-	// // Store the time difference between the SYN packets sent to port_x and port_y
-	// long low_rst_diff_2 = wait_for_rst_packet(sockfd);
-
-    // long low_rst_diff = abs(low_rst_diff_2 - low_rst_diff_1);
 
 	// sleep for inter_measurement_time
 	sleep(inter_measurement_time);
@@ -291,6 +243,8 @@ int main(int argc, char *argv[]) {
 		free(high_entropy_data);
 		return -1;
 	}
+
+    // Create the thread2 to wait for RST packets from the last 2 SYN packets
     if (pthread_create(&thread2, NULL, wait_for_rst_thread, &sockfd)!= 0) {
         perror("pthread_create");
         exit(1);
@@ -298,20 +252,15 @@ int main(int argc, char *argv[]) {
 
 	// Send the SYN packet to the port_x
 	send_syn_packet(sockfd, &target_x , packet_ttl, tcp_port);
-    // long high_rst_diff_1 = wait_for_rst_packet(sockfd);
 
 	// send high entropy data
 	train_size = udp_packet_train_size;
 	packet_id = train_size - 1;
 	loss_count = 0;
 
-
-
 	for (i = 0; i < train_size; i++) {
 
 		strncpy(buf + sizeof(struct iphdr) + sizeof(struct udphdr), high_entropy_data, udp_payload_size);
-
-
 
 		((unsigned short *)buf)[0] = htons(packet_id--);
 		ret = sendto(sock_udp, buf, udp_payload_size, 0, (struct sockaddr *)&target_udp, sizeof(target_udp));
@@ -324,33 +273,25 @@ int main(int argc, char *argv[]) {
 	// Send the second SYN packet to the port_y and timestamp it within the send_syn_packet function
 	send_syn_packet(sockfd, &target_y, packet_ttl, tcp_port );
 
+    // Wait for the thread2 to finish
     pthread_join(thread2, NULL);
-    // long high_rst_diff_2 = wait_for_rst_packet(sockfd);
 
     // Calculate the time differences and their difference between the two threads
     long diff_first = abs(high_rst_diffs_thread1_first[0] - high_rst_diffs_thread2_first[0]);
     long diff_second = abs(high_rst_diffs_thread1_second[0] - high_rst_diffs_thread2_second[0]);
     long diff_total = abs(diff_second - diff_first);
 
-    printf("diff_first: %ld\n", diff_total);
+    // Print the results
+    if (diff_total/1000 > THRESHOLD) {
+    	printf("%s\n","Compression detected");
+    }
+    else {
+    	printf("%s\n","No compression detected");
+    }
 
-	// // store the time difference between the two RST packets
-	// long high_rst_diff = abs(high_rst_diff_2 - high_rst_diff_1);
-
-	// Compare the time difference between the two RST packets for the low entropy and high entropy data
-	// to determine if compression is detected
-	// if(abs(high_rst_diff - low_rst_diff)/1000 > THRESHOLD){
-	// 	printf("%s\n","Compression detected");
-	// }
-	// else{
-	// 	printf("%s\n","No compression detected");
-	// }
-
-
-
+    // Clean up the memory and close the sockets
 	cJSON_Delete(json); // delete the JSON object
 	free(config_string); // free the string memory
-    // Close the socket
 	free(high_entropy_data);
 	close(sock_udp);
 	close(sockfd);
@@ -483,6 +424,7 @@ void send_syn_packet(int sockfd, struct sockaddr_in *target, int packet_ttl, int
  * @param sockfd: the raw socket file descriptor
  */
 long wait_for_rst_packet(int sockfd) {
+
     // catch the RST packet and return the timestamp
 	struct timeval end1;
     int count = 0;
@@ -543,3 +485,44 @@ long wait_for_rst_packet(int sockfd) {
 		fclose(fp);
 		return data;
 	}	
+
+
+// Define the thread function to wait for RST packets
+void* wait_for_rst_thread(void* arg) {
+    int sockfd = *(int*)arg;
+    long* rst_diff_ptr = (long*)malloc(sizeof(long));
+    int num_rst_packets = 0;
+    long* high_rst_diffs_first;
+    long* high_rst_diffs_second;
+
+    // Determine which global arrays to store the time differences in
+    if (pthread_self() == thread1) {
+        high_rst_diffs_first = high_rst_diffs_thread1_first;
+        high_rst_diffs_second = high_rst_diffs_thread1_second;
+    } else if (pthread_self() == thread2) {
+        high_rst_diffs_first = high_rst_diffs_thread2_first;
+        high_rst_diffs_second = high_rst_diffs_thread2_second;
+    } else {
+        // This should never happen
+        perror("Error: invalid thread");
+        exit(1);
+    }
+
+    while (num_rst_packets < NUM_RST_PACKETS) {
+        // Wait for an RST packet
+        *rst_diff_ptr = wait_for_rst_packet(sockfd);
+
+        // Store the time difference in the appropriate global array
+        if (num_rst_packets == 0) {
+            high_rst_diffs_first[num_rst_packets] = *rst_diff_ptr;
+        } else {
+            high_rst_diffs_second[num_rst_packets - 1] = *rst_diff_ptr;
+        }
+
+        // Increment the counter
+        num_rst_packets++;
+    }
+
+    free(rst_diff_ptr);
+    pthread_exit(NULL);
+}
