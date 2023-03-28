@@ -10,6 +10,7 @@
 #include <sys/select.h>
 #include <signal.h>
 #include "cJSON.h"
+#include <pthread.h>
 
 /*
  * A spoofed source IP address defined in the IP header, can be any IP address
@@ -43,7 +44,7 @@ void cleanExit() {exit(0);}
 // @param sockfd: the socket file descriptor
 unsigned short csum(unsigned short *ptr, int nbytes);
 void send_syn_packet(int sockfd, struct sockaddr_in *target, int packet_ttl, int src_port) ;
-long wait_for_rst_packets(int sockfd);
+long wait_for_rst_packet(int sockfd);
 char* read_high_entropy_data(const char *filename, int size);
 
 /*
@@ -185,7 +186,8 @@ int main(int argc, char *argv[]) {
 	// // Set the signal handler for SIGALRM
 	signal(SIGALRM, handler);
 	// Send the SYN packet to the port_x and timestamp it within the send_syn_packet function
-	send_syn_packet(sockfd, &target_x, packet_ttl, tcp_port); 
+	send_syn_packet(sockfd, &target_x, packet_ttl, tcp_port);
+    long low_rst_diff_1 = wait_for_rst_packet(sockfd); 
 
 	train_size = udp_packet_train_size;
 	packet_id = train_size - 1;
@@ -205,9 +207,10 @@ int main(int argc, char *argv[]) {
 	send_syn_packet(sockfd, &target_y, packet_ttl, tcp_port);
 
 	// Store the time difference between the SYN packets sent to port_x and port_y
-	long low_rst_diff = wait_for_rst_packets(sockfd);
+	long low_rst_diff_2 = wait_for_rst_packet(sockfd);
 
-
+	long low_rst_diff = abs(low_rst_diff_2 - low_rst_diff_1);
+printf("Time difference between RST packets: %ld microseconds\n", low_rst_diff);
 	// sleep for inter_measurement_time
 	sleep(inter_measurement_time);
 
@@ -223,6 +226,7 @@ int main(int argc, char *argv[]) {
 
 	// Send the SYN packet to the port_x
 	send_syn_packet(sockfd, &target_x , packet_ttl, tcp_port);
+    long high_rst_diff_1 = wait_for_rst_packet(sockfd);
 
 	// send high entropy data
 	train_size = udp_packet_train_size;
@@ -247,10 +251,12 @@ int main(int argc, char *argv[]) {
 
 	// Send the second SYN packet to the port_y and timestamp it within the send_syn_packet function
 	send_syn_packet(sockfd, &target_y, packet_ttl, tcp_port );
+    long high_rst_diff_2 = wait_for_rst_packet(sockfd);
 
 	// store the time difference between the two RST packets
-	long high_rst_diff = wait_for_rst_packets(sockfd);
+	long high_rst_diff = abs(high_rst_diff_2 - high_rst_diff_1);
 
+	printf("Time difference between RST packets: %ld microseconds\n", high_rst_diff);
 
 	// Compare the time difference between the two RST packets for the low entropy and high entropy data
 	// to determine if compression is detected
@@ -395,54 +401,37 @@ void send_syn_packet(int sockfd, struct sockaddr_in *target, int packet_ttl, int
  * Returns the time difference between the two RST packets
  * @param sockfd: the raw socket file descriptor
  */
-long wait_for_rst_packets(int sockfd) {
-	struct timeval start, end1, end2;
+long wait_for_rst_packet(int sockfd) {
+    // catch the RST packet and return the timestamp
+	struct timeval end1;
+    int count = 0;
 
-	gettimeofday(&start, NULL); // Get start time
+    while (1) {
+        char buffer[IP_MAXPACKET];
+        memset(buffer, 0, IP_MAXPACKET);
+        struct sockaddr_in source;
+        socklen_t source_len = sizeof(source);
+        int packet_len = recvfrom(sockfd, buffer, IP_MAXPACKET, 0, (struct sockaddr *)&source, &source_len);
+        if (packet_len < 0) {
+            perror("recvfrom");
+            exit(1);
+        }
+        struct iphdr *ip_header = (struct iphdr *)buffer;
+        struct tcphdr *tcp_header = (struct tcphdr *)(buffer + sizeof(struct iphdr));
+        if (tcp_header->rst == 1) {
+            if (count == 0) {
+                gettimeofday(&end1, NULL);
+                printf("RST packet received at %ld microseconds.\n", end1.tv_usec);
+                count++;
+                return end1.tv_usec;
+            }
+        }
+        
+    }
 
-	int rst_count = 0;
-	fd_set readfds;
-	FD_ZERO(&readfds);
-	FD_SET(sockfd, &readfds);
+    return 0;
 
-	while (rst_count < 2) {
-		int max_fd = sockfd + 1;
-		int ready = select(max_fd, &readfds, NULL, NULL, NULL);
-		if (ready < 0) {
-			perror("select");
-			exit(1);
-		}
-		if (FD_ISSET(sockfd, &readfds)) {
-			char packet[IP_MAXPACKET];
-			memset(packet, 0, IP_MAXPACKET);
-
-			if (recvfrom(sockfd, packet, IP_MAXPACKET, 0, NULL, NULL) < 0) {
-				perror("recvfrom");
-				exit(1);
-			}
-
-			gettimeofday(&end2, NULL); // Update end2 time
-			if (rst_count == 0) {
-				gettimeofday(&end1, NULL); // Get end1 time
-			}
-
-			struct iphdr *iph = (struct iphdr *)packet;
-			struct tcphdr *tcph = (struct tcphdr *)(packet + sizeof(struct iphdr));
-
-			if (tcph->rst) {
-				rst_count++;
-				printf("RST packet %d received at %ld.%06ld seconds\n", rst_count, end2.tv_sec - start.tv_sec, end2.tv_usec - start.tv_usec);
-			}
-		}
-	}
-
-	long time_diff = (end2.tv_sec - end1.tv_sec) * 1000000 + (end2.tv_usec - end1.tv_usec);
-
-	printf("Time difference between RST packets: %ld microseconds\n", time_diff);
-	return time_diff;
-	}
-
-
+}
 
 	/*
 	 * Function to read the high entropy data from the file
