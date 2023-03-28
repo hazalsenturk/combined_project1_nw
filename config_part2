@@ -1,0 +1,12 @@
+{
+  "server_ip": "192.168.64.15",
+  "udp_src_port": 9876,
+  "udp_dest_port": 9999,
+  "tcp_head_syn_port": 34567,
+  "tcp_tail_syn_port": 33987,
+  "tcp_port": 8787,
+  "udp_payload_size": 1000,
+  "inter_measurement_time": 15,
+  "udp_packet_train_size": 6000,
+  "udp_packet_ttl": 255
+}
